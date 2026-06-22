@@ -474,6 +474,35 @@
   input[type="range"]{-webkit-appearance:none;appearance:none;height:4px;border-radius:2px;background:var(--border);outline:none;padding:0;border:none;}
   input[type="range"]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:var(--gold);cursor:pointer;}
 
+  /* ── FIREBASE LOADING OVERLAY ── */
+  #fb-loader{
+    position:fixed;inset:0;z-index:9999;
+    background:var(--bg-deep);
+    display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:16px;
+  }
+  #fb-loader.hidden{display:none;}
+  .fb-spinner{
+    width:44px;height:44px;border-radius:50%;
+    border:3px solid var(--border);
+    border-top-color:var(--gold);
+    animation:spin .8s linear infinite;
+  }
+  @keyframes spin{to{transform:rotate(360deg);}}
+  .fb-loader-text{font-size:12px;color:var(--text-muted);letter-spacing:1px;}
+  .fb-loader-logo{
+    font-family:var(--brand);font-size:36px;font-weight:900;letter-spacing:4px;
+    background:linear-gradient(135deg,#ffe066,#e8b84b,#fff8dc,#d4a029);
+    -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;
+  }
+  .fb-error{color:var(--red);font-size:13px;text-align:center;max-width:300px;line-height:1.6;}
+  .fb-status{
+    position:fixed;top:0;left:0;right:0;height:2px;z-index:9998;
+    background:linear-gradient(90deg,var(--gold),var(--teal));
+    transition:opacity .5s;
+  }
+  .fb-status.hidden{opacity:0;}
+
   /* ── SCORE BANNER ── */
   .score-banner {
     background: var(--bg-card);
@@ -605,8 +634,22 @@
   .pindah-from { font-size:10px; color:var(--red); }
   .pindah-to { font-size:10px; color:var(--green); }
 </style>
+<!-- ═══════════════════════════════════════
+     FIREBASE SDK (v8 compat — CDN)
+═══════════════════════════════════════ -->
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+<!-- Auth tidak diperlukan — akses kontrol dijaga PIN aplikasi -->
 </head>
 <body>
+
+<!-- ── FIREBASE LOADING OVERLAY ── -->
+<div id="fb-loader">
+  <div class="fb-loader-logo">SIKERJA</div>
+  <div class="fb-spinner"></div>
+  <div class="fb-loader-text" id="fb-loader-msg">Menghubungkan ke server...</div>
+</div>
+<div class="fb-status" id="fb-status"></div>
 
 <!-- LOGIN -->
 <div id="login-page">
@@ -1041,15 +1084,286 @@ const EMPLOYEES=[
 ];
 
 // ════════════════════════════════════
-// STORAGE
+// FIREBASE CONFIGURATION
 // ════════════════════════════════════
-const KEY_PINS='simkk2_pins';
-const KEY_KONTRAK='simkk2_kontrak';
-const KEY_EVALUASI='simkk2_evaluasi';
-const KEY_KEGIATAN='simkk2_kegiatan';
+// ⚠️ GANTI dengan konfigurasi Firebase project Anda!
+// Ambil dari: Firebase Console → Project Settings → Your apps → Web app
+const FIREBASE_CONFIG = {
+  apiKey:            "AIzaSyAH4rGO5jlbfBfx_pIj7SILpJtMKg8atr4",
+  authDomain:        "sikerja-fffbf.firebaseapp.com",
+  projectId:         "sikerja-fffbf",
+  storageBucket:     "sikerja-fffbf.firebasestorage.app",
+  messagingSenderId: "646089501834",
+  appId:             "1:646089501834:web:737e9926a4b26255c9d173"
+};
 
-function ld(k,d){try{const v=localStorage.getItem(k);return v!==null?JSON.parse(v):d;}catch(e){return d;}}
-function sd(k,v){localStorage.setItem(k,JSON.stringify(v));}
+firebase.initializeApp(FIREBASE_CONFIG);
+const db = firebase.firestore();
+
+// ════════════════════════════════════
+// IN-MEMORY CACHE (mengganti localStorage)
+// Semua fungsi render tetap membaca dari DB,
+// onSnapshot menjaga agar DB selalu sinkron dari Firestore.
+// ════════════════════════════════════
+const DB = {
+  kegiatan:    [],   // array of kegiatan objects
+  evaluasi:    [],   // array of evaluasi objects
+  kontrak:     {},   // {userId: kontrakObj}
+  pins:        {},   // {userId: pinString}
+  empOverrides:{},   // {userId: overrideObj}
+  empAdditions:[],   // array of extra employees
+  empRemoved:  [],   // array of removed employee ids
+  adminLog:    [],   // array of log entries
+};
+
+// Listeners cleanup (saat logout)
+let _unsubListeners = [];
+let _currentPage = 'executive';
+
+// ════════════════════════════════════
+// STORAGE KEYS (dipertahankan agar kompatibel dgn kode yg ada)
+// ════════════════════════════════════
+const KEY_PINS          = 'simkk2_pins';
+const KEY_KONTRAK       = 'simkk2_kontrak';
+const KEY_EVALUASI      = 'simkk2_evaluasi';
+const KEY_KEGIATAN      = 'simkk2_kegiatan';
+
+// ════════════════════════════════════
+// ld() — baca dari DB cache (mengganti localStorage.getItem)
+// ════════════════════════════════════
+function ld(k, d) {
+  const map = {
+    'simkk2_pins':          () => DB.pins,
+    'simkk2_kontrak':       () => DB.kontrak,
+    'simkk2_evaluasi':      () => DB.evaluasi,
+    'simkk2_kegiatan':      () => DB.kegiatan,
+    'simkk2_emp_overrides': () => DB.empOverrides,
+    'simkk2_emp_additions': () => DB.empAdditions,
+    'simkk2_emp_removed':   () => DB.empRemoved,
+    'simkk2_admin_log':     () => DB.adminLog,
+  };
+  const fn = map[k];
+  if (!fn) return d;
+  const v = fn();
+  return (v !== undefined && v !== null) ? v : d;
+}
+
+// ════════════════════════════════════
+// sd() — tulis ke DB cache + sync ke Firestore (fire-and-forget)
+// ════════════════════════════════════
+function sd(key, value) {
+  switch(key) {
+
+    case KEY_KEGIATAN: {
+      const old = [...DB.kegiatan];
+      DB.kegiatan = value;
+      _syncKegiatanFS(old, value);
+      break;
+    }
+
+    case KEY_EVALUASI: {
+      const old = [...DB.evaluasi];
+      DB.evaluasi = value;
+      _syncEvaluasiFS(old, value);
+      break;
+    }
+
+    case KEY_KONTRAK: {
+      const old = {...DB.kontrak};
+      DB.kontrak = value;
+      // Hanya tulis entry yang berubah
+      for (const uid of Object.keys(value)) {
+        if (JSON.stringify(value[uid]) !== JSON.stringify(old[uid])) {
+          db.doc(`kontrak/${uid}`).set(value[uid]).catch(console.error);
+        }
+      }
+      break;
+    }
+
+    case KEY_PINS: {
+      DB.pins = value;
+      db.doc('settings/pins').set(value).catch(console.error);
+      break;
+    }
+
+    case 'simkk2_emp_overrides': {
+      DB.empOverrides = value;
+      db.doc('settings/empConfig').set({ overrides: value }, { merge: true }).catch(console.error);
+      break;
+    }
+
+    case 'simkk2_emp_additions': {
+      DB.empAdditions = value;
+      db.doc('settings/empConfig').set({ additions: value }, { merge: true }).catch(console.error);
+      break;
+    }
+
+    case 'simkk2_emp_removed': {
+      DB.empRemoved = value;
+      db.doc('settings/empConfig').set({ removed: value }, { merge: true }).catch(console.error);
+      break;
+    }
+
+    case 'simkk2_admin_log': {
+      DB.adminLog = value;
+      // adminLog ditulis satu-per-satu via addLogEntry(), tidak perlu sync di sini
+      break;
+    }
+  }
+}
+
+// ════════════════════════════════════
+// FIRESTORE SYNC HELPERS
+// ════════════════════════════════════
+
+async function _syncKegiatanFS(oldArr, newArr) {
+  try {
+    const oldIds  = new Set(oldArr.map(k => k.id));
+    const newIds  = new Set(newArr.map(k => k.id));
+    const batch   = db.batch();
+    let ops = 0;
+    // Upsert yang baru / berubah (max 500 per batch)
+    for (const item of newArr) {
+      batch.set(db.doc(`kegiatan/${item.id}`), item);
+      if (++ops >= 490) break; // Firestore batch limit
+    }
+    // Hapus yang sudah dihapus dari array
+    for (const item of oldArr) {
+      if (!newIds.has(item.id)) {
+        batch.delete(db.doc(`kegiatan/${item.id}`));
+        if (++ops >= 490) break;
+      }
+    }
+    await batch.commit();
+  } catch(e) { console.error('Sync kegiatan error:', e); }
+}
+
+async function _syncEvaluasiFS(oldArr, newArr) {
+  try {
+    const oldIds = new Set(oldArr.map(e => e.id));
+    const newIds = new Set(newArr.map(e => e.id));
+    const batch  = db.batch();
+    for (const item of newArr) {
+      batch.set(db.doc(`evaluasi/${item.id}`), item);
+    }
+    for (const item of oldArr) {
+      if (!newIds.has(item.id)) batch.delete(db.doc(`evaluasi/${item.id}`));
+    }
+    await batch.commit();
+  } catch(e) { console.error('Sync evaluasi error:', e); }
+}
+
+// Tulis satu log entry (dipanggil dari adminLog())
+function _addLogEntry(entry) {
+  db.collection('adminLog').add(entry).catch(console.error);
+}
+
+// Hapus semua log dari Firestore
+async function _clearAllLogs() {
+  try {
+    const snap  = await db.collection('adminLog').get();
+    const batch = db.batch();
+    snap.docs.forEach(d => batch.delete(d.ref));
+    await batch.commit();
+  } catch(e) { console.error('Clear log error:', e); }
+}
+
+// Hapus semua kegiatan dari Firestore
+async function _clearAllKegiatan() {
+  try {
+    const snap  = await db.collection('kegiatan').get();
+    const batch = db.batch();
+    snap.docs.forEach(d => batch.delete(d.ref));
+    await batch.commit();
+  } catch(e) { console.error('Clear kegiatan error:', e); }
+}
+
+// ════════════════════════════════════
+// REALTIME LISTENERS (dipasang setelah login)
+// ════════════════════════════════════
+function setupRealtimeListeners() {
+  // Bersihkan listener lama
+  _unsubListeners.forEach(u => u());
+  _unsubListeners = [];
+
+  // Kegiatan — real-time antar semua user
+  _unsubListeners.push(
+    db.collection('kegiatan').onSnapshot(snap => {
+      DB.kegiatan = snap.docs.map(d => d.data());
+      _refreshCurrentPage();
+    }, e => console.warn('Listener kegiatan:', e))
+  );
+
+  // Evaluasi
+  _unsubListeners.push(
+    db.collection('evaluasi').onSnapshot(snap => {
+      DB.evaluasi = snap.docs.map(d => d.data());
+      _refreshCurrentPage();
+    }, e => console.warn('Listener evaluasi:', e))
+  );
+
+  // Kontrak
+  _unsubListeners.push(
+    db.collection('kontrak').onSnapshot(snap => {
+      DB.kontrak = {};
+      snap.docs.forEach(d => { DB.kontrak[d.id] = d.data(); });
+      _refreshCurrentPage();
+    }, e => console.warn('Listener kontrak:', e))
+  );
+
+  // Pins — update otomatis jika admin ganti PIN
+  _unsubListeners.push(
+    db.doc('settings/pins').onSnapshot(doc => {
+      if (doc.exists) DB.pins = doc.data();
+    }, e => console.warn('Listener pins:', e))
+  );
+
+  // Emp config — update otomatis jika admin tambah/nonaktifkan pegawai
+  _unsubListeners.push(
+    db.doc('settings/empConfig').onSnapshot(doc => {
+      if (doc.exists) {
+        const d = doc.data();
+        DB.empOverrides = d.overrides  || {};
+        DB.empAdditions = d.additions  || [];
+        DB.empRemoved   = d.removed    || [];
+      }
+      _refreshCurrentPage();
+    }, e => console.warn('Listener empConfig:', e))
+  );
+
+  // Admin log
+  _unsubListeners.push(
+    db.collection('adminLog').orderBy('ts', 'desc').limit(200).onSnapshot(snap => {
+      DB.adminLog = snap.docs.map(d => d.data());
+    }, e => console.warn('Listener adminLog:', e))
+  );
+}
+
+// Hentikan semua listener (saat logout)
+function teardownListeners() {
+  _unsubListeners.forEach(u => u());
+  _unsubListeners = [];
+}
+
+// Refresh halaman yang sedang aktif (dipanggil dari onSnapshot)
+function _refreshCurrentPage() {
+  if (!CU) return;
+  const map = {
+    'executive':  renderExecutive,
+    'kegiatan':   renderKegiatan,
+    'validasi':   renderValidasi,
+    'eval-staf':  renderEvalStaf,
+    'evaluasi':   renderEvaluasi,
+    'profil':     renderProfil,
+    'kontrak':    renderKontrak,
+  };
+  const fn = map[_currentPage];
+  if (fn) {
+    try { fn(); } catch(e) {}
+  }
+  // Update badge validasi (notif di sidebar)
+  updateValidasiBadge();
+}
 
 // ════════════════════════════════════
 // STATE
@@ -1179,6 +1493,8 @@ function doLogin(){
   document.getElementById('app').style.display='block';
   updateTopBar();
   updateSidebar();
+  // Pasang real-time listeners setelah login berhasil
+  setupRealtimeListeners();
   // Mobile: ensure sidebar hidden, show bottom nav
   if(window.innerWidth<=600){
     const sb=document.getElementById('sidebar');
@@ -1189,7 +1505,16 @@ function doLogin(){
 }
 
 function doLogout(){
+  // Hentikan semua real-time listeners
+  teardownListeners();
+  // Reset data cache (jangan biarkan data user lama tersisa)
+  DB.kegiatan   = [];
+  DB.evaluasi   = [];
+  DB.kontrak    = {};
+  DB.adminLog   = [];
+  // Pins, empOverrides, empAdditions, empRemoved tetap di-cache (diperlukan untuk login ulang)
   CU=null;
+  _currentPage='executive';
   document.getElementById('app').style.display='none';
   document.getElementById('login-page').style.display='flex';
   document.getElementById('login-pin').value='';
@@ -1305,6 +1630,9 @@ function showPage(name){
     ||(!hasStaf&&['validasi','eval-staf'].includes(name))
     ||(name==='admin'&&!CU._isAdmin);
   if(blocked){toast('⛔ Halaman ini tidak tersedia untuk peran Anda.');return;}
+
+  // Catat halaman aktif untuk refresh dari onSnapshot
+  _currentPage = name;
 
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
@@ -2420,14 +2748,15 @@ getDirectStaf = function(id) {
 };
 
 function adminLog(action, detail) {
-  const logs = ld(KEY_ADMIN_LOG, []);
-  logs.unshift({
+  const entry = {
     ts: new Date().toISOString(),
     action, detail,
     by: CU?.name || 'Admin',
-  });
-  // Simpan max 200 log
-  sd(KEY_ADMIN_LOG, logs.slice(0, 200));
+  };
+  DB.adminLog.unshift(entry);
+  if (DB.adminLog.length > 200) DB.adminLog.pop();
+  // Tulis satu dokumen per log entry ke Firestore
+  _addLogEntry(entry);
 }
 
 // ── ADMIN EDIT STATE ──
@@ -3013,7 +3342,8 @@ function clearAllOverrides() {
 function clearKegiatanData() {
   if (!confirm('HAPUS SEMUA DATA KEGIATAN?\nIni akan menghapus semua kegiatan dan poin seluruh pegawai.\nTindakan tidak dapat dibatalkan!')) return;
   if (!confirm('Konfirmasi sekali lagi: Hapus semua kegiatan harian?')) return;
-  sd(KEY_KEGIATAN, []);
+  DB.kegiatan = [];
+  _clearAllKegiatan();
   adminLog('CLEAR_KEGIATAN', 'Menghapus seluruh data kegiatan harian');
   renderAdminData();
   toast('✔ Semua data kegiatan berhasil dihapus.');
@@ -3120,7 +3450,8 @@ function renderAdminLog() {
 
 function clearAdminLog() {
   if (!confirm('Hapus seluruh log aktivitas admin?')) return;
-  sd(KEY_ADMIN_LOG, []);
+  DB.adminLog = [];
+  _clearAllLogs();
   renderAdminLog();
   toast('✔ Log aktivitas dihapus.');
 }
@@ -3128,37 +3459,80 @@ function clearAdminLog() {
 // ════════════════════════════════════
 // INIT
 // ════════════════════════════════════
-window.addEventListener('DOMContentLoaded',()=>{
-  // Bersihkan data lama (key berbeda agar fresh)
-  // localStorage.clear(); // uncomment jika ingin hard reset
-  initLogin();
-  document.querySelectorAll('.modal-bg').forEach(bg=>{
-    bg.addEventListener('click',e=>{if(e.target===bg)bg.classList.remove('open');});
-  });
-  const kbf=document.getElementById('k-filter-bln');
-  if(kbf) kbf.value=new Date().toISOString().slice(0,7);
+// ════════════════════════════════════
+// APP INITIALIZATION — Firebase (tanpa Auth)
+// ════════════════════════════════════
+window.addEventListener('DOMContentLoaded', async () => {
 
-  // Mobile init: sidebar hidden by default
-  const sb=document.getElementById('sidebar');
-  if(window.innerWidth<=600 && sb){
-    sb.style.transform='translateX(-220px)';
+  const loaderEl  = document.getElementById('fb-loader');
+  const loaderMsg = document.getElementById('fb-loader-msg');
+  const statusBar = document.getElementById('fb-status');
+
+  function setMsg(msg) { if(loaderMsg) loaderMsg.textContent = msg; }
+  function hideLoader() {
+    if(loaderEl)  loaderEl.classList.add('hidden');
+    if(statusBar) statusBar.classList.add('hidden');
+  }
+  function showFatalError(msg) {
+    if(!loaderEl) return;
+    loaderEl.innerHTML = `
+      <div class="fb-loader-logo">SIKERJA</div>
+      <div class="fb-error">❌ ${msg}</div>
+      <button class="btn btn-outline" style="margin-top:16px;" onclick="location.reload()">🔄 Coba Lagi</button>
+    `;
   }
 
-  // Resize handler
-  window.addEventListener('resize',()=>{
-    updateBottomNavVisibility();
-    const sb=document.getElementById('sidebar');
-    const mn=document.getElementById('main');
-    if(window.innerWidth>600){
-      if(sb) sb.style.transform='';
-      if(mn) mn.style.marginLeft='220px';
-      const ov=document.getElementById('sidebar-overlay');
-      if(ov) ov.classList.remove('open');
-    } else {
-      if(sb && !sb.classList.contains('open')) sb.style.transform='translateX(-220px)';
-      if(mn) mn.style.marginLeft='0';
+  try {
+    setMsg('Menghubungkan ke Firestore...');
+
+    // Muat data yang diperlukan untuk login (pins + empConfig)
+    const [pinsSnap, cfgSnap] = await Promise.all([
+      db.doc('settings/pins').get(),
+      db.doc('settings/empConfig').get(),
+    ]);
+    DB.pins         = pinsSnap.exists ? pinsSnap.data()  : {};
+    const cfg       = cfgSnap.exists  ? cfgSnap.data()   : {};
+    DB.empOverrides = cfg.overrides   || {};
+    DB.empAdditions = cfg.additions   || [];
+    DB.empRemoved   = cfg.removed     || [];
+
+    setMsg('Siap!');
+    hideLoader();
+
+    // Inisialisasi halaman login
+    initLogin();
+    document.querySelectorAll('.modal-bg').forEach(bg => {
+      bg.addEventListener('click', e => { if(e.target===bg) bg.classList.remove('open'); });
+    });
+    const kbf = document.getElementById('k-filter-bln');
+    if(kbf) kbf.value = new Date().toISOString().slice(0,7);
+
+    const sb = document.getElementById('sidebar');
+    if(window.innerWidth<=600 && sb) sb.style.transform = 'translateX(-220px)';
+
+    window.addEventListener('resize', () => {
+      updateBottomNavVisibility();
+      const sb  = document.getElementById('sidebar');
+      const mn  = document.getElementById('main');
+      if(window.innerWidth>600){
+        if(sb) sb.style.transform='';
+        if(mn) mn.style.marginLeft='220px';
+        const ov=document.getElementById('sidebar-overlay');
+        if(ov) ov.classList.remove('open');
+      } else {
+        if(sb && !sb.classList.contains('open')) sb.style.transform='translateX(-220px)';
+        if(mn) mn.style.marginLeft='0';
+      }
+    });
+
+  } catch(err) {
+    console.error('Firestore init error:', err);
+    let msg = 'Tidak dapat terhubung ke Firestore. Periksa:<br>1. Koneksi internet<br>2. Firebase config sudah benar<br>3. Firestore sudah dibuat di Console';
+    if (err.code === 'permission-denied') {
+      msg = 'Akses Firestore ditolak. Pastikan Security Rules sudah diset ke <strong>test mode</strong> di Firebase Console.';
     }
-  });
+    showFatalError(msg);
+  }
 });
 </script>
 </body>
