@@ -1407,12 +1407,13 @@ const EMPLOYEES=[
 // ════════════════════════════════════
 
 // ⚠️ GANTI sesuai alamat server backend Anda (lihat backend/README.md)
-const API_BASE = 'http://192.168.1.2:3001/api';
+//const API_BASE = 'http://192.168.1.2:3001/api';
+const API_BASE = 'https://nasdkbu.myqnapcloud.com:8443/api';
 
 // ⚠️ WAJIB diisi (harus SAMA PERSIS dengan API_KEY di file .env backend)
 // kalau backend diakses dari luar jaringan kantor. Kosongkan hanya kalau
 // backend cuma bisa diakses dari jaringan lokal yang sudah tepercaya.
-const API_KEY = '7532c183c7f897d9ee22d111a120f16bd9713a25fdd92ddf05765840a3abb741';
+const API_KEY = '4a7e934540a786d229743141fa02c8e15fddcf22479db34c43ff4b117053e777';
 
 function _apiHeaders(extra = {}) {
   const h = { ...extra };
@@ -4193,7 +4194,7 @@ function openKegiatanModal(){
   const tanggalInput = document.getElementById('k-tanggal');
   if(tanggalInput){
     tanggalInput.value = today();
-    tanggalInput.min   = today();
+    //tanggalInput.min   = today();
     tanggalInput.max   = today();
     tanggalInput.disabled = false;
   }
@@ -4273,11 +4274,11 @@ async function saveKegiatan(){
 
   } else {
     // ── MODE TAMBAH ──
-    if(tanggal < today()){
-      toast('⚠️ Tanggal kegiatan tidak boleh lebih awal dari hari ini.');
-      document.getElementById('k-tanggal').value = today();
-      return;
-    }
+   // if(tanggal < today()){
+     // toast('⚠️ Tanggal kegiatan tidak boleh lebih awal dari hari ini.');
+     // document.getElementById('k-tanggal').value = today();
+     // return;
+   // }
     const newK = {
       id:'k_'+Date.now()+'_'+Math.random().toString(36).slice(2),
       userId:CU.id,
